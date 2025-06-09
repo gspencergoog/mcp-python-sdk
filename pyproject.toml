@@ -1,6 +1,7 @@
 [project]
 name = "mcp"
-dynamic = ["version"]
+# dynamic = ["version"]
+version = "1.8.0"
 description = "Model Context Protocol SDK"
 readme = "README.md"
 requires-python = ">=3.10"
