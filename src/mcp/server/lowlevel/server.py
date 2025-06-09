@@ -42,6 +42,20 @@ Usage:
    ) -> None:
        # Implementation
 
+    @server.initialized_notification()
+    async def handle_initialized_notification(
+        notification: mcp_types.InitializedNotification,
+        session: ServerSession
+    ):
+       # Implementation
+
+    @server.roots_list_changed_notification()
+    async def handle_roots_list_changed_notification(
+        notification: mcp_types.RootsListChangedNotification,
+        session: ServerSession
+    ):
+       # Implementation
+
 4. Run the server:
    async def main():
        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -69,6 +83,7 @@ from __future__ import annotations as _annotations
 
 import contextvars
 import logging
+import inspect
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
@@ -97,11 +112,6 @@ RequestT = TypeVar("RequestT", default=Any)
 # This will be properly typed in each Server instance's context
 request_ctx: contextvars.ContextVar[RequestContext[ServerSession, Any, Any]] = (
     contextvars.ContextVar("request_ctx")
-)
-
-# Context variable to hold the current ServerSession, accessible by notification handlers
-current_session_ctx: contextvars.ContextVar[ServerSession] = contextvars.ContextVar(
-    "current_server_session"
 )
 
 
@@ -472,7 +482,17 @@ class Server(Generic[LifespanResultT, RequestT]):
             ),
         ):
             logger.debug("Registering handler for InitializedNotification")
-            self.notification_handlers[types.InitializedNotification] = func
+
+            async def handler(
+                notification: types.InitializedNotification, session: ServerSession
+            ):
+                sig = inspect.signature(func)
+                if len(sig.parameters) == 2:
+                    await func(notification, session)
+                else:
+                    await func(notification)
+
+            self.notification_handlers[types.InitializedNotification] = handler
             return func
 
         return decorator
@@ -489,7 +509,17 @@ class Server(Generic[LifespanResultT, RequestT]):
             ),
         ):
             logger.debug("Registering handler for RootsListChangedNotification")
-            self.notification_handlers[types.RootsListChangedNotification] = func
+
+            async def handler(
+                notification: types.RootsListChangedNotification, session: ServerSession
+            ):
+                sig = inspect.signature(func)
+                if len(sig.parameters) == 2:
+                    await func(notification, session)
+                else:
+                    await func(notification)
+
+            self.notification_handlers[types.RootsListChangedNotification] = handler
             return func
 
         return decorator
@@ -575,36 +605,32 @@ class Server(Generic[LifespanResultT, RequestT]):
         lifespan_context: LifespanResultT,
         raise_exceptions: bool = False,
     ):
-        session_token = current_session_ctx.set(session)
-        try:
-            with warnings.catch_warnings(record=True) as w:
-                # TODO(Marcelo): We should be checking if message is Exception here.
-                match message:  # type: ignore[reportMatchNotExhaustive]
-                    case RequestResponder(
-                        request=types.ClientRequest(root=req)
-                    ) as responder:
-                        with responder:
-                            # _handle_request will set its own request_ctx
-                            await self._handle_request(
-                                message,
-                                req,
-                                session,
-                                lifespan_context,
-                                raise_exceptions,
-                            )
-                    case types.ClientNotification(root=notify):
-                        await self._handle_notification(notify)
-                    case Exception() as exc_message:
-                        logger.error(f"Exception from read stream: {exc_message}")
+        with warnings.catch_warnings(record=True) as w:
+            # TODO(Marcelo): We should be checking if message is Exception here.
+            match message:  # type: ignore[reportMatchNotExhaustive]
+                case RequestResponder(
+                    request=types.ClientRequest(root=req)
+                ) as responder:
+                    with responder:
+                        # _handle_request will set its own request_ctx
+                        await self._handle_request(
+                            message,
+                            req,
+                            session,
+                            lifespan_context,
+                            raise_exceptions,
+                        )
+                case types.ClientNotification(root=notify):
+                    await self._handle_notification(notify, session)
+                case Exception() as exc_message:
+                    logger.error(f"Exception from read stream: {exc_message}")
 
-                for warning_message in w:
-                    logger.info(
-                        "Warning: %s: %s",
-                        warning_message.category.__name__,
-                        warning_message.message,
-                    )
-        finally:
-            current_session_ctx.reset(session_token)
+            for warning_message in w:
+                logger.info(
+                    "Warning: %s: %s",
+                    warning_message.category.__name__,
+                    warning_message.message,
+                )
 
     async def _handle_request(
         self,
@@ -661,12 +687,12 @@ class Server(Generic[LifespanResultT, RequestT]):
 
         logger.debug("Response sent")
 
-    async def _handle_notification(self, notify: Any):
+    async def _handle_notification(self, notify: Any, session: ServerSession):
         if handler := self.notification_handlers.get(type(notify)):  # type: ignore
             logger.debug("Dispatching notification of type %s", type(notify).__name__)
 
             try:
-                await handler(notify)
+                await handler(notify, session)
             except Exception:
                 logger.exception("Uncaught exception in notification handler")
 
