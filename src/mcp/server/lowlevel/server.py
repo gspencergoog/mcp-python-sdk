@@ -99,6 +99,11 @@ request_ctx: contextvars.ContextVar[RequestContext[ServerSession, Any, Any]] = (
     contextvars.ContextVar("request_ctx")
 )
 
+# Context variable to hold the current ServerSession, accessible by notification handlers
+current_session_ctx: contextvars.ContextVar[ServerSession] = contextvars.ContextVar(
+    "current_server_session"
+)
+
 
 class NotificationOptions:
     def __init__(
@@ -455,6 +460,40 @@ class Server(Generic[LifespanResultT, RequestT]):
 
         return decorator
 
+    def initialized_notification(self):
+        """Decorator to register a handler for InitializedNotification."""
+
+        def decorator(
+            func: (
+                Callable[
+                    [types.InitializedNotification, ServerSession], Awaitable[None]
+                ]
+                | Callable[[types.InitializedNotification], Awaitable[None]]
+            ),
+        ):
+            logger.debug("Registering handler for InitializedNotification")
+            self.notification_handlers[types.InitializedNotification] = func
+            return func
+
+        return decorator
+
+    def roots_list_changed_notification(self):
+        """Decorator to register a handler for RootsListChangedNotification."""
+
+        def decorator(
+            func: (
+                Callable[
+                    [types.RootsListChangedNotification, ServerSession], Awaitable[None]
+                ]
+                | Callable[[types.RootsListChangedNotification], Awaitable[None]]
+            ),
+        ):
+            logger.debug("Registering handler for RootsListChangedNotification")
+            self.notification_handlers[types.RootsListChangedNotification] = func
+            return func
+
+        return decorator
+
     def completion(self):
         """Provides completions for prompts and resource templates"""
 
@@ -473,9 +512,11 @@ class Server(Generic[LifespanResultT, RequestT]):
                 completion = await func(req.params.ref, req.params.argument)
                 return types.ServerResult(
                     types.CompleteResult(
-                        completion=completion
-                        if completion is not None
-                        else types.Completion(values=[], total=None, hasMore=None),
+                        completion=(
+                            completion
+                            if completion is not None
+                            else types.Completion(values=[], total=None, hasMore=None)
+                        ),
                     )
                 )
 
@@ -525,30 +566,45 @@ class Server(Generic[LifespanResultT, RequestT]):
 
     async def _handle_message(
         self,
-        message: RequestResponder[types.ClientRequest, types.ServerResult]
-        | types.ClientNotification
-        | Exception,
+        message: (
+            RequestResponder[types.ClientRequest, types.ServerResult]
+            | types.ClientNotification
+            | Exception
+        ),
         session: ServerSession,
         lifespan_context: LifespanResultT,
         raise_exceptions: bool = False,
     ):
-        with warnings.catch_warnings(record=True) as w:
-            # TODO(Marcelo): We should be checking if message is Exception here.
-            match message:  # type: ignore[reportMatchNotExhaustive]
-                case (
-                    RequestResponder(request=types.ClientRequest(root=req)) as responder
-                ):
-                    with responder:
-                        await self._handle_request(
-                            message, req, session, lifespan_context, raise_exceptions
-                        )
-                case types.ClientNotification(root=notify):
-                    await self._handle_notification(notify)
+        session_token = current_session_ctx.set(session)
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                # TODO(Marcelo): We should be checking if message is Exception here.
+                match message:  # type: ignore[reportMatchNotExhaustive]
+                    case RequestResponder(
+                        request=types.ClientRequest(root=req)
+                    ) as responder:
+                        with responder:
+                            # _handle_request will set its own request_ctx
+                            await self._handle_request(
+                                message,
+                                req,
+                                session,
+                                lifespan_context,
+                                raise_exceptions,
+                            )
+                    case types.ClientNotification(root=notify):
+                        await self._handle_notification(notify)
+                    case Exception() as exc_message:
+                        logger.error(f"Exception from read stream: {exc_message}")
 
-            for warning in w:
-                logger.info(
-                    "Warning: %s: %s", warning.category.__name__, warning.message
-                )
+                for warning_message in w:
+                    logger.info(
+                        "Warning: %s: %s",
+                        warning_message.category.__name__,
+                        warning_message.message,
+                    )
+        finally:
+            current_session_ctx.reset(session_token)
 
     async def _handle_request(
         self,
