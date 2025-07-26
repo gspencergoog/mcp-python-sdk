@@ -94,7 +94,7 @@ from mcp.shared.session import RequestResponder
 
 logger = logging.getLogger(__name__)
 
-LifespanResultT = TypeVar("LifespanResultT")
+LifespanResultT = TypeVar("LifespanResultT", default=Any)
 RequestT = TypeVar("RequestT", default=Any)
 
 # type aliases for tool call results
@@ -122,7 +122,7 @@ class NotificationOptions:
 
 
 @asynccontextmanager
-async def lifespan(server: Server[LifespanResultT, RequestT]) -> AsyncIterator[object]:
+async def lifespan(_: Server[LifespanResultT, RequestT]) -> AsyncIterator[dict[str, Any]]:
     """Default lifespan context manager that does nothing.
 
     Args:
